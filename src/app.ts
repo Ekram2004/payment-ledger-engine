@@ -2,8 +2,8 @@ import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import dotenv from 'dotenv';
 import { db } from './db/index.js';
 import { paymentService, PaymentService } from './services/payment.service.js';
-import { timeStamp } from 'node:console';
-import { request } from 'node:http';
+import { IdempotencyConflictError, idempotencyService } from './services/idempotency.service.js';
+
 
 dotenv.config();
 
@@ -57,22 +57,55 @@ export function buildApp() {
 
     app.post('/api/payment-intents', async (request: FastifyRequest, reply: FastifyReply) => {
         const body = request.body as { merchantId?: string; amount?: number; currency?: string };
+        const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
+
         if (!body.merchantId || !body.amount) {
             return reply.status(400).send({ error: 'merchantId and amount (in minor units) are required.' });
+        }
+
+        if (idempotencyKey) {
+            const requestHash = idempotencyService.generateRequestHash(request.url, body);
+
+            try {
+                const lockResult = await idempotencyService.lockKey(body.merchantId, idempotencyKey, requestHash);
+
+                if (!lockResult.isNew && lockResult.existingRecord) {
+                    const cached = lockResult.existingRecord;
+                    return reply.status(cached.responseCode || 200).send(cached.responseBody);
+                }
+                const intent = await paymentService.createPaymentIntent({
+                    merchantId: body.merchantId,
+                    amount: BigInt(body.amount),
+                    currency: body.currency || 'ETB'
+                });
+                const responsePayload = {
+                    ...intent,
+                    amount: intent.amount.toString(),
+                };
+
+                await idempotencyService.saveResponse(body.merchantId, idempotencyKey, 201, responsePayload);
+
+                return reply.status(201).send(responsePayload);
+            } catch (err: any) {
+                if (err instanceof IdempotencyConflictError) {
+                    return reply.status(err.statusCode).send({ error: err.message });
+                }
+                return reply.status(500).send({ error: err.message });
+            }
         }
         try {
             const intent = await paymentService.createPaymentIntent({
                 merchantId: body.merchantId,
                 amount: BigInt(body.amount),
-                currency: body.currency || 'ETB'
+                currency: body.currency || 'ETB',
             });
 
             return reply.status(201).send({
                 ...intent,
-                amount: intent.amount.toString()
+                amount: intent.amount.toString(),
             });
         } catch (err: any) {
-            return reply.status(400).send({ error: err.message });
+            return reply.status(400).send({ error: err.message })
         }
     });
 
