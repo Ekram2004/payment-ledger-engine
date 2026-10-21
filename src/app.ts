@@ -8,7 +8,16 @@ import { IdempotencyConflictError, idempotencyService } from './services/idempot
 dotenv.config();
 
 export function buildApp() {
-    const app = Fastify({ logger: true });
+    const app = Fastify({
+      logger: {
+        level: "info",
+        transport:
+          process.env.NODE_ENV === "development"
+            ? { target: "pino-pretty" }
+            : undefined,
+      },
+      genReqId: (req) => req.headers["x-request-id"] as string || crypto.randomUUID(),
+    });
 
     app.get('/health', async () => {
         return {
