@@ -37,13 +37,15 @@ export class PaymentService {
             FAILED: []
         };
     
-    async createPaymentIntent(input: CreatePaymentIntentInput): Promise<PaymentIntentRecord>{
+    async createPaymentIntent(input: CreatePaymentIntentInput, client?: PoolClient): Promise<PaymentIntentRecord>{
         const { merchantId, amount, currency = 'ETB' } = input;
 
         if (amount <= 0n) {
             throw new Error('Payment amount must be strictly greater than 0.');
         }
-        const res = await db.query(
+
+        const queryable = client ?? db;
+        const res = await queryable.query(
           `INSERT INTO payment_intents (merchant_id, amount, currency, status)
             VALUES($1, $2, $3, 'CREATED')
             RETURNING id, merchant_id, amount, currency, status, provider_ref, created_at, updated_at
@@ -119,6 +121,20 @@ export class PaymentService {
                         ]
                     },
                     client
+                );
+                const outboxPayload = {
+                  paymentIntentId: updated.id,
+                  merchantId: updated.merchant_id,
+                  amount: updated.amount.toString(),
+                  currency: updated.currency,
+                  providerRef: updated.provider_ref,
+                  status: "SUCCEEDED",
+                };
+                await client.query(
+                    `INSERT INTO outbox_events(aggregate_type, aggregate_id, event_type, payload, status) VALUES('PAYMENT_INTENT', $1,$2,$3,'PENDING')`,
+                    [updated.id,
+                        'PAYMENT_SUCCEEDED',
+                        JSON.stringify(outboxPayload)]
                 );
             }
 
